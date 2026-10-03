@@ -1,6 +1,7 @@
 import request from 'supertest';
 import { describe, it, expect, beforeEach, afterAll } from '@jest/globals';
-import { app, server, redis } from './index';
+import { app, server } from './index';
+import { redis } from './redis';
 
 describe('POST /api/buy', () => {
   beforeEach(async () => {

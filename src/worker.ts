@@ -1,34 +1,26 @@
 import amqplib from 'amqplib';
-import { Pool } from 'pg';
-import Redis from 'ioredis';
+import { pool } from './db';
+import { redis } from './redis';
+import { QUEUE_NAME } from './rabbitmq';
 import dotenv from 'dotenv';
 
 dotenv.config();
-
-const QUEUE_NAME = 'orders_queue';
-const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
-
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432'),
-  user: process.env.POSTGRES_USER || 'flash_user',
-  password: process.env.POSTGRES_PASSWORD || 'flash_password',
-  database: process.env.POSTGRES_DB || 'flash_sale',
-});
 
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
       id SERIAL PRIMARY KEY,
       user_id VARCHAR(255) NOT NULL,
+      product_id VARCHAR(50) NOT NULL DEFAULT 'IPHONE-16-PRO',
       warehouse_id VARCHAR(50) NOT NULL,
       status VARCHAR(50) NOT NULL,
       transaction_id VARCHAR(255),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(user_id) -- Idempotency constraint for Phase 1
+      UNIQUE(user_id, product_id),
+      UNIQUE(transaction_id)
     );
   `);
-  console.log('Database initialized');
+  console.log('Database initialized with strict idempotency constraints');
 }
 
 async function startWorker() {
@@ -50,6 +42,9 @@ async function startWorker() {
         try {
           const orderData = JSON.parse(msg.content.toString());
           console.log('Processing order:', orderData);
+          
+          // Spec: We intentionally add a sleep(500ms) delay to the DB Worker
+          await new Promise(r => setTimeout(r, 500));
 
           if (orderData.action === 'CONFIRM_PAYMENT') {
             console.log(`Processing payment confirmation for user: ${orderData.userId}`);
@@ -64,7 +59,7 @@ async function startWorker() {
             await pool.query(
               `INSERT INTO orders (user_id, warehouse_id, status) 
                VALUES ($1, $2, $3)
-               ON CONFLICT (user_id) DO NOTHING`,
+               ON CONFLICT (user_id, product_id) DO NOTHING`,
               [orderData.userId, orderData.warehouseId, orderData.status]
             );
 
@@ -75,10 +70,15 @@ async function startWorker() {
           // Manual ACK after successful DB commit
           channel.ack(msg);
           console.log(`Message for ${orderData.userId} ACKed.`);
-        } catch (err) {
-          console.error('Error processing message, returning to queue:', err);
-          // NACK the message to requeue it
-          channel.nack(msg);
+        } catch (err: any) {
+          if (err.code === '23505') {
+            console.error('Unique constraint violation, discarding message to prevent infinite retry:', err.detail);
+            channel.ack(msg); // Drop it if it's a hard DB violation (e.g., duplicated transaction_id)
+          } else {
+            console.error('Error processing message, returning to queue:', err);
+            // NACK the message to requeue it
+            channel.nack(msg);
+          }
         }
       }
     });
@@ -87,5 +87,8 @@ async function startWorker() {
     console.error('Worker failed to start:', err);
   }
 }
+
+// Start cron job alongside the worker
+import './cron';
 
 startWorker();
