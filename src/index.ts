@@ -1,13 +1,36 @@
 import express from 'express';
 import Redis from 'ioredis';
 import dotenv from 'dotenv';
-
 import amqplib from 'amqplib';
+import client from 'prom-client';
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
+
+// Setup Prometheus metrics
+const register = new client.Registry();
+client.collectDefaultMetrics({ register });
+
+const requestsCounter = new client.Counter({
+  name: 'flash_api_requests_total',
+  help: 'Total number of purchase requests',
+  registers: [register]
+});
+
+const inventoryGauge = new client.Gauge({
+  name: 'flash_inventory_remaining',
+  help: 'Current inventory remaining by warehouse',
+  labelNames: ['warehouse'],
+  registers: [register]
+});
+
+const queueGauge = new client.Gauge({
+  name: 'flash_queue_size',
+  help: 'Current number of orders in the RabbitMQ queue',
+  registers: [register]
+});
 
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
@@ -90,6 +113,8 @@ app.post('/api/reset', async (req, res) => {
 });
 
 app.post('/api/buy', async (req, res) => {
+  requestsCounter.inc();
+  
   try {
     const { userId } = req.body;
     
@@ -97,8 +122,6 @@ app.post('/api/buy', async (req, res) => {
       return res.status(400).json({ error: 'userId is required' });
     }
 
-    // Execute the Lua script atomically
-    // We pass: idempotencyKey, warehouseA, warehouseB, then the ARGV (userId)
     const result = await redis.attemptPurchase(
       IDEMPOTENCY_KEY,
       WAREHOUSES[0],
@@ -114,10 +137,8 @@ app.post('/api/buy', async (req, res) => {
       return res.status(400).json({ error: 'Sold Out', message: 'All warehouses are depleted.' });
     }
 
-    // result contains the warehouse key (e.g., "inventory:WH_A")
     const warehouseId = String(result).split(':')[1];
 
-    // Publish to Message Queue for async persistence
     if (mqChannel) {
       const message = JSON.stringify({
         userId,
@@ -136,6 +157,29 @@ app.post('/api/buy', async (req, res) => {
   } catch (error) {
     console.error('Error processing purchase:', error);
     return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Expose metrics endpoint
+app.get('/metrics', async (req, res) => {
+  try {
+    // Update inventory gauges
+    for (const wh of WAREHOUSES) {
+      const stock = await redis.get(wh);
+      const whName = wh.split(':')[1];
+      inventoryGauge.labels(whName).set(parseInt(stock || '0', 10));
+    }
+    
+    // Update RabbitMQ queue gauge
+    if (mqChannel) {
+      const q = await mqChannel.checkQueue(QUEUE_NAME);
+      queueGauge.set(q.messageCount);
+    }
+
+    res.set('Content-Type', register.contentType);
+    res.end(await register.metrics());
+  } catch (ex) {
+    res.status(500).end(ex);
   }
 });
 
