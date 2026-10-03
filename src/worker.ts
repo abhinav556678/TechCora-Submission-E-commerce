@@ -1,10 +1,12 @@
 import amqplib from 'amqplib';
 import { Pool } from 'pg';
+import Redis from 'ioredis';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const QUEUE_NAME = 'orders_queue';
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
@@ -56,6 +58,9 @@ async function startWorker() {
              ON CONFLICT (user_id) DO NOTHING`,
             [orderData.userId, orderData.warehouseId, orderData.status]
           );
+
+          // Success! Clear the TTL lock in Redis so the Reaper doesn't restock it
+          await redis.del(`reservation:inventory:${orderData.warehouseId}:${orderData.userId}`);
 
           // Manual ACK after successful DB commit
           channel.ack(msg);

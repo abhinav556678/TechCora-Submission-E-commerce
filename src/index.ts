@@ -57,52 +57,76 @@ setupRabbitMQ();
 const PURCHASE_LUA_SCRIPT = `
 local idempotency_key = KEYS[1]
 local user_id = ARGV[1]
+local ttl = tonumber(ARGV[2])
 
--- 1. Check if user already reserved (Idempotency)
 if redis.call('SISMEMBER', idempotency_key, user_id) == 1 then
-    return -2 -- Duplicate request
+    return -2
 end
 
--- 2. Iterate through warehouses to find stock
 for i = 2, #KEYS do
     local wh_key = KEYS[i]
     local stock = tonumber(redis.call('GET', wh_key) or '0')
     
     if stock > 0 then
-        -- Deduct stock
         redis.call('DECR', wh_key)
-        
-        -- Mark user as having purchased (with a 5-minute TTL for eventual consistency)
-        -- We'll add full TTL and reaper logic in Ticket 06, but we set the baseline here
         redis.call('SADD', idempotency_key, user_id)
         
-        return wh_key -- Return the warehouse ID that fulfilled the order
+        local lock_key = 'reservation:' .. wh_key .. ':' .. user_id
+        redis.call('SETEX', lock_key, ttl, 'LOCKED')
+        
+        return wh_key
     end
 end
 
-return -1 -- Sold out across all warehouses
+return -1
 `;
 
-// Define Redis script command
 redis.defineCommand('attemptPurchase', {
-  numberOfKeys: 3, // 1 idempotency key + 2 warehouse keys
+  numberOfKeys: 3, 
   lua: PURCHASE_LUA_SCRIPT,
 });
 
-// Types for our custom command
 declare module 'ioredis' {
   interface RedisCommander<Context> {
     attemptPurchase(
       idempotencyKey: string,
       warehouseA: string,
       warehouseB: string,
-      userId: string
+      userId: string,
+      ttl: string
     ): Promise<string | number>;
   }
 }
 
 const IDEMPOTENCY_KEY = 'users:purchased';
 const WAREHOUSES = ['inventory:WH_A', 'inventory:WH_B'];
+
+// Reaper: Listen for expired reservations
+const sub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+redis.config('SET', 'notify-keyspace-events', 'Ex');
+
+sub.subscribe('__keyevent@0__:expired', (err) => {
+  if (err) console.error('Failed to subscribe to expirations', err);
+  else console.log('Reaper listening for expired reservations...');
+});
+
+sub.on('message', async (channel, message) => {
+  // message is the key name: reservation:inventory:WH_A:user123
+  if (message.startsWith('reservation:')) {
+    const parts = message.split(':');
+    // parts = ['reservation', 'inventory', 'WH_A', 'user123']
+    if (parts.length >= 4) {
+      const wh_key = parts[1] + ':' + parts[2];
+      const user_id = parts.slice(3).join(':');
+      
+      console.log(`Reaper: Reservation expired for ${user_id}. Restocking ${wh_key}`);
+      await redis.incr(wh_key);
+      
+      // Remove from permanent idempotency so user can try again
+      await redis.srem(IDEMPOTENCY_KEY, user_id);
+    }
+  }
+});
 
 // Initialize inventory for demo
 app.post('/api/reset', async (req, res) => {
@@ -126,7 +150,8 @@ app.post('/api/buy', async (req, res) => {
       IDEMPOTENCY_KEY,
       WAREHOUSES[0],
       WAREHOUSES[1],
-      String(userId)
+      String(userId),
+      '300' // 5 minutes TTL
     );
 
     if (result === -2) {
@@ -156,6 +181,37 @@ app.post('/api/buy', async (req, res) => {
 
   } catch (error) {
     console.error('Error processing purchase:', error);
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Crash simulation endpoint
+app.post('/api/buy/simulate-crash', async (req, res) => {
+  try {
+    const userId = `crash_user_${Date.now()}`;
+    
+    const result = await redis.attemptPurchase(
+      IDEMPOTENCY_KEY,
+      WAREHOUSES[0],
+      WAREHOUSES[1],
+      userId,
+      '5' // 5 seconds TTL for quick demo
+    );
+
+    if (result === -1 || result === -2) {
+      return res.status(400).json({ error: 'Failed to reserve during crash simulation' });
+    }
+
+    // INTENTIONAL CRASH: We DO NOT publish to RabbitMQ here!
+    console.log(`CRASH SIMULATED for ${userId}. Item reserved in Redis but not queued.`);
+
+    return res.status(202).json({
+      message: 'Crash simulated. Reservation locked in Redis, but queue was bypassed.',
+      userId,
+      ttl: 5
+    });
+
+  } catch (error) {
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 });
