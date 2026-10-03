@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TechCora - Flash Sale</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .pulse {
+      animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: .5; }
+    }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-4">
+
+  <div class="max-w-md w-full bg-white rounded-xl shadow-2xl overflow-hidden">
+    <div class="bg-red-600 px-6 py-4 flex justify-between items-center">
+      <h2 class="text-2xl font-bold text-white">⚡ FLASH SALE</h2>
+      <span class="bg-red-800 text-red-100 text-xs font-bold px-2 py-1 rounded-full uppercase tracking-wider">Live</span>
+    </div>
+    
+    <div class="p-6 text-center">
+      <div class="w-full h-48 bg-gray-200 rounded-lg mb-6 flex items-center justify-center relative">
+        <!-- Mock Phone Image Placeholder -->
+        <span class="text-6xl">📱</span>
+        <div id="soldOutOverlay" class="absolute inset-0 bg-black/60 rounded-lg flex items-center justify-center hidden">
+          <span class="text-3xl font-extrabold text-white transform -rotate-12 border-4 border-red-500 p-2 text-red-500">SOLD OUT</span>
+        </div>
+      </div>
+      
+      <h3 class="text-xl font-bold text-gray-900 mb-2">iPhone 16 Pro (Flash Edition)</h3>
+      <p class="text-gray-500 mb-6">Extreme limited run. 100 units only.</p>
+      
+      <div class="flex justify-between items-center bg-gray-50 p-4 rounded-lg mb-6 border border-gray-200">
+        <span class="text-gray-600 font-medium">Available Stock:</span>
+        <div class="text-right">
+          <span id="stockCount" class="text-3xl font-black text-gray-900 pulse">--</span>
+          <span class="text-sm text-gray-500 block">/ 100</span>
+        </div>
+      </div>
+
+      <button id="buyButton" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 px-6 rounded-lg text-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+        Buy Now - $999
+      </button>
+
+      <p id="statusMessage" class="mt-4 text-sm font-medium h-4"></p>
+    </div>
+  </div>
+
+  <script>
+    const stockCountEl = document.getElementById('stockCount');
+    const buyButton = document.getElementById('buyButton');
+    const statusMessage = document.getElementById('statusMessage');
+    const soldOutOverlay = document.getElementById('soldOutOverlay');
+    
+    let isSoldOut = false;
+    // Generate a random user ID for this browser session
+    const myUserId = 'web_user_' + Math.floor(Math.random() * 1000000);
+
+    // Poll the backend for live inventory
+    async function fetchInventory() {
+      try {
+        const res = await fetch('/api/inventory');
+        const data = await res.json();
+        
+        const totalStock = data.total;
+        stockCountEl.textContent = totalStock;
+        stockCountEl.classList.remove('pulse');
+
+        if (totalStock <= 0 && !isSoldOut) {
+          isSoldOut = true;
+          buyButton.disabled = true;
+          buyButton.classList.replace('bg-blue-600', 'bg-gray-400');
+          buyButton.classList.replace('hover:bg-blue-700', 'bg-gray-400');
+          buyButton.textContent = 'Out of Stock';
+          soldOutOverlay.classList.remove('hidden');
+          stockCountEl.classList.add('text-red-600');
+        } else if (totalStock > 0 && isSoldOut) {
+          // In case of restock (demo purposes/reaper)
+          isSoldOut = false;
+          buyButton.disabled = false;
+          buyButton.classList.replace('bg-gray-400', 'bg-blue-600');
+          buyButton.textContent = 'Buy Now - $999';
+          soldOutOverlay.classList.add('hidden');
+          stockCountEl.classList.remove('text-red-600');
+        }
+      } catch (err) {
+        console.error('Failed to fetch inventory', err);
+      }
+    }
+
+    // Attempt to buy
+    buyButton.addEventListener('click', async () => {
+      buyButton.disabled = true;
+      buyButton.textContent = 'Processing...';
+      
+      try {
+        const res = await fetch('/api/buy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: myUserId })
+        });
+        
+        const data = await res.json();
+        
+        if (res.status === 202) {
+          statusMessage.textContent = '🎉 ' + data.message + '!';
+          statusMessage.className = 'mt-4 text-sm font-medium h-4 text-green-600';
+          buyButton.textContent = 'Reserved!';
+          // Don't re-enable button if they secured it
+        } else if (res.status === 409) {
+          statusMessage.textContent = '⚠️ ' + data.message;
+          statusMessage.className = 'mt-4 text-sm font-medium h-4 text-yellow-600';
+          buyButton.textContent = 'Already Purchased';
+        } else {
+          statusMessage.textContent = '❌ ' + data.message;
+          statusMessage.className = 'mt-4 text-sm font-medium h-4 text-red-600';
+          if (!isSoldOut) {
+            buyButton.disabled = false;
+            buyButton.textContent = 'Buy Now - $999';
+          }
+        }
+        
+        // Immediately fetch updated stock
+        fetchInventory();
+      } catch (err) {
+        statusMessage.textContent = 'Network error occurred.';
+        statusMessage.className = 'mt-4 text-sm font-medium h-4 text-red-600';
+        buyButton.disabled = false;
+        buyButton.textContent = 'Buy Now - $999';
+      }
+    });
+
+    // Start polling every 500ms for a real-time reactive feel
+    setInterval(fetchInventory, 500);
+    fetchInventory();
+  </script>
+</body>
+</html>

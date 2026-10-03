@@ -8,6 +8,7 @@ dotenv.config();
 
 const app = express();
 app.use(express.json());
+app.use(express.static('public')); // Serve the frontend
 
 // Setup Prometheus metrics
 const register = new client.Registry();
@@ -134,6 +135,26 @@ app.post('/api/reset', async (req, res) => {
   await redis.set('inventory:WH_B', '40');
   await redis.del(IDEMPOTENCY_KEY);
   res.json({ message: 'Inventory reset (WH_A: 60, WH_B: 40)' });
+});
+
+// Live inventory endpoint for the frontend
+app.get('/api/inventory', async (req, res) => {
+  try {
+    const whA = await redis.get('inventory:WH_A') || '0';
+    const whB = await redis.get('inventory:WH_B') || '0';
+    
+    const total = parseInt(whA, 10) + parseInt(whB, 10);
+    
+    res.json({
+      total,
+      warehouses: {
+        WH_A: parseInt(whA, 10),
+        WH_B: parseInt(whB, 10)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch inventory' });
+  }
 });
 
 app.post('/api/buy', async (req, res) => {
