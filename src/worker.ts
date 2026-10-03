@@ -51,20 +51,30 @@ async function startWorker() {
           const orderData = JSON.parse(msg.content.toString());
           console.log('Processing order:', orderData);
 
-          // Idempotent insert
-          await pool.query(
-            `INSERT INTO orders (user_id, warehouse_id, status) 
-             VALUES ($1, $2, $3)
-             ON CONFLICT (user_id) DO NOTHING`,
-            [orderData.userId, orderData.warehouseId, orderData.status]
-          );
+          if (orderData.action === 'CONFIRM_PAYMENT') {
+            console.log(`Processing payment confirmation for user: ${orderData.userId}`);
+            await pool.query(
+              `UPDATE orders 
+               SET status = 'CONFIRMED', transaction_id = $1 
+               WHERE user_id = $2 AND status != 'CONFIRMED'`,
+              [orderData.transactionId, orderData.userId]
+            );
+          } else {
+            // Default reservation action
+            await pool.query(
+              `INSERT INTO orders (user_id, warehouse_id, status) 
+               VALUES ($1, $2, $3)
+               ON CONFLICT (user_id) DO NOTHING`,
+              [orderData.userId, orderData.warehouseId, orderData.status]
+            );
 
-          // Success! Clear the TTL lock in Redis so the Reaper doesn't restock it
-          await redis.del(`reservation:inventory:${orderData.warehouseId}:${orderData.userId}`);
+            // Success! Clear the TTL lock in Redis so the Reaper doesn't restock it
+            await redis.del(`reservation:inventory:${orderData.warehouseId}:${orderData.userId}`);
+          }
 
           // Manual ACK after successful DB commit
           channel.ack(msg);
-          console.log(`Order ${orderData.userId} persisted and message ACKed.`);
+          console.log(`Message for ${orderData.userId} ACKed.`);
         } catch (err) {
           console.error('Error processing message, returning to queue:', err);
           // NACK the message to requeue it

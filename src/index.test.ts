@@ -54,4 +54,23 @@ describe('POST /api/buy', () => {
     expect(response.status).toBe(400);
     expect(response.body).toHaveProperty('error', 'Sold Out');
   });
+
+  describe('POST /webhook/payment', () => {
+    it('should return 200 OK and accept the payload', async () => {
+      const response = await request(app)
+        .post('/webhook/payment')
+        .send({ userId: 'u1', transactionId: 'txn_123' });
+      
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('received', true);
+    });
+
+    it('should return 400 if fields are missing', async () => {
+      const response = await request(app)
+        .post('/webhook/payment')
+        .send({ userId: 'u1' });
+      
+      expect(response.status).toBe(400);
+    });
+  });
 });

@@ -216,6 +216,33 @@ app.post('/api/buy/simulate-crash', async (req, res) => {
   }
 });
 
+// Payment Webhook (e.g. from Stripe)
+app.post('/webhook/payment', async (req, res) => {
+  try {
+    const { userId, transactionId } = req.body;
+    
+    if (!userId || !transactionId) {
+      return res.status(400).json({ error: 'userId and transactionId are required' });
+    }
+
+    // We push the webhook payload to the queue so the DB worker handles it idempotently.
+    if (mqChannel) {
+      const message = JSON.stringify({
+        action: 'CONFIRM_PAYMENT',
+        userId,
+        transactionId,
+        timestamp: new Date().toISOString()
+      });
+      mqChannel.sendToQueue(QUEUE_NAME, Buffer.from(message), { persistent: true });
+    }
+
+    // Immediately return 200 OK to the payment gateway so it doesn't retry
+    return res.status(200).json({ received: true });
+  } catch (error) {
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
 // Expose metrics endpoint
 app.get('/metrics', async (req, res) => {
   try {
