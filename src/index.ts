@@ -2,6 +2,8 @@ import express from 'express';
 import Redis from 'ioredis';
 import dotenv from 'dotenv';
 
+import amqplib from 'amqplib';
+
 dotenv.config();
 
 const app = express();
@@ -9,13 +11,24 @@ app.use(express.json());
 
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
-redis.on('connect', () => {
-  console.log('Connected to Redis');
-});
+redis.on('connect', () => console.log('Connected to Redis'));
+redis.on('error', (err) => console.error('Redis connection error:', err));
 
-redis.on('error', (err) => {
-  console.error('Redis connection error:', err);
-});
+let mqConnection: any;
+let mqChannel: any;
+const QUEUE_NAME = 'orders_queue';
+
+async function setupRabbitMQ() {
+  try {
+    mqConnection = await amqplib.connect(process.env.RABBITMQ_URL || 'amqp://localhost');
+    mqChannel = await mqConnection.createChannel();
+    await mqChannel.assertQueue(QUEUE_NAME, { durable: true });
+    console.log('Connected to RabbitMQ');
+  } catch (err) {
+    console.error('RabbitMQ connection error:', err);
+  }
+}
+setupRabbitMQ();
 
 // The atomic Lua script
 const PURCHASE_LUA_SCRIPT = `
@@ -103,6 +116,17 @@ app.post('/api/buy', async (req, res) => {
 
     // result contains the warehouse key (e.g., "inventory:WH_A")
     const warehouseId = String(result).split(':')[1];
+
+    // Publish to Message Queue for async persistence
+    if (mqChannel) {
+      const message = JSON.stringify({
+        userId,
+        warehouseId,
+        status: 'RESERVED',
+        timestamp: new Date().toISOString()
+      });
+      mqChannel.sendToQueue(QUEUE_NAME, Buffer.from(message), { persistent: true });
+    }
 
     return res.status(202).json({
       message: 'Reservation accepted',
