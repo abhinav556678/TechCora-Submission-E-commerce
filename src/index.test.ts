@@ -4,8 +4,10 @@ import { app, server, redis } from './index';
 
 describe('POST /api/buy', () => {
   beforeEach(async () => {
-    // Reset inventory to 2 for quick testing
-    await redis.set('inventory:simple', '2');
+    // Reset inventory to a small amount for testing
+    await redis.set('inventory:WH_A', '1');
+    await redis.set('inventory:WH_B', '1');
+    await redis.del('users:purchased');
   });
 
   afterAll(async () => {
@@ -13,26 +15,43 @@ describe('POST /api/buy', () => {
     server.close();
   });
 
-  it('should return 202 Accepted when stock is available', async () => {
-    const response = await request(app).post('/api/buy').send({ userId: 1 });
+  it('should return 202 and deduct from WH_A first', async () => {
+    const response = await request(app).post('/api/buy').send({ userId: 'user1' });
     expect(response.status).toBe(202);
     expect(response.body).toHaveProperty('message', 'Reservation accepted');
-    expect(response.body).toHaveProperty('remainingStock', 1);
+    expect(response.body).toHaveProperty('warehouse', 'WH_A');
   });
 
-  it('should return 400 Sold Out when stock is depleted', async () => {
-    // Buy 1
-    await request(app).post('/api/buy').send({ userId: 1 });
-    // Buy 2
-    await request(app).post('/api/buy').send({ userId: 2 });
-    // Buy 3 - should fail
-    const response = await request(app).post('/api/buy').send({ userId: 3 });
+  it('should return 409 for duplicate user requests', async () => {
+    // First purchase
+    await request(app).post('/api/buy').send({ userId: 'user_dup' });
+    // Second purchase attempt
+    const response = await request(app).post('/api/buy').send({ userId: 'user_dup' });
+    
+    expect(response.status).toBe(409);
+    expect(response.body).toHaveProperty('error', 'Duplicate');
+  });
+
+  it('should fallback to WH_B if WH_A is empty', async () => {
+    // user1 exhausts WH_A
+    await request(app).post('/api/buy').send({ userId: 'user1' });
+    
+    // user2 should automatically get from WH_B
+    const response = await request(app).post('/api/buy').send({ userId: 'user2' });
+    
+    expect(response.status).toBe(202);
+    expect(response.body).toHaveProperty('warehouse', 'WH_B');
+  });
+
+  it('should return 400 Sold Out when all warehouses are empty', async () => {
+    // Buy WH_A
+    await request(app).post('/api/buy').send({ userId: 'u1' });
+    // Buy WH_B
+    await request(app).post('/api/buy').send({ userId: 'u2' });
+    // Try to buy when empty
+    const response = await request(app).post('/api/buy').send({ userId: 'u3' });
     
     expect(response.status).toBe(400);
     expect(response.body).toHaveProperty('error', 'Sold Out');
-    
-    // Verify stock is precisely 0
-    const stock = await redis.get('inventory:simple');
-    expect(stock).toBe('0');
   });
 });
